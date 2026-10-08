@@ -1,15 +1,25 @@
 const app = require("./src/app");
 
 const {
-  startCleanupJob
+  startCleanupJob,
 } = require("./src/services/cleanup.service");
+
+const {
+  connectRedis,
+} = require("./src/config/redis");
 
 const PORT = 3000;
 
-startCleanupJob();
+async function start() {
+  await connectRedis();
 
-app.listen(PORT, () => {
-  console.log(
-    `Session Service Running On Port ${PORT}`
-  );
-});
+  startCleanupJob();
+
+  app.listen(PORT, () => {
+    console.log(
+      `Session Service Running On Port ${PORT}`
+    );
+  });
+}
+
+start();

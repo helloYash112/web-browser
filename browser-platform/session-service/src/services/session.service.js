@@ -1,6 +1,9 @@
 const crypto = require("crypto");
 const docker = require("./docker.service");
-const sessions = require("../store/session.store");
+
+const {
+  redis,
+} = require("../config/redis");
 
 async function createSession() {
   const sessionId = crypto.randomUUID();
@@ -58,33 +61,67 @@ async function createSession() {
     createdAt: new Date().toISOString()
   };
 
-  sessions.set(sessionId, session);
+  await redis.set(
+    `session:${sessionId}`,
+    JSON.stringify(session)
+  );
 
   return session;
 }
 
-function getAllSessions() {
-  return [...sessions.values()];
+async function getAllSessions() {
+  const keys = await redis.keys("session:*");
+
+  const sessions = [];
+
+  for (const key of keys) {
+    const data = await redis.get(key);
+
+    if (data) {
+      sessions.push(JSON.parse(data));
+    }
+  }
+
+  return sessions;
 }
 
-function getSession(id) {
-  return sessions.get(id);
+async function getSession(id) {
+  const data = await redis.get(`session:${id}`);
+
+  return data
+    ? JSON.parse(data)
+    : null;
 }
 
 async function deleteSession(id) {
-  const session = sessions.get(id);
+  const data = await redis.get(`session:${id}`);
 
-  if (!session) {
+  if (!data) {
     return null;
   }
+
+  const session = JSON.parse(data);
 
   const container =
     docker.getContainer(session.containerId);
 
-  await container.stop();
-  await container.remove();
+  try {
+    await container.stop();
+  } catch (err) {
+    console.log(
+      `Container ${session.containerId} already stopped`
+    );
+  }
 
-  sessions.delete(id);
+  try {
+    await container.remove();
+  } catch (err) {
+    console.log(
+      `Container ${session.containerId} already removed`
+    );
+  }
+
+  await redis.del(`session:${id}`);
 
   return true;
 }

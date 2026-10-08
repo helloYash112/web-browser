@@ -1,4 +1,14 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+
+    ports:
+      - "6379:6379"
+
+    networks:
+      - backend
+
   session-service:
     build:
       context: ./session-service
@@ -10,3 +20,13 @@ services:
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+    depends_on:
+      - redis
+
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge

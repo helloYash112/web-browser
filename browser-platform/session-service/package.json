@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
   },
   "keywords": [],
   "author": "",
@@ -13,7 +14,7 @@
   "dependencies": {
     "dockerode": "^5.0.1",
     "express": "^5.2.1",
-    "redis": "^6.3.0",
+    "redis": "^4.7.1",
     "uuid": "^14.0.2"
   }
 }
