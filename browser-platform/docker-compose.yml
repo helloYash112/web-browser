@@ -1,13 +1,13 @@
 services:
+
   redis:
     image: redis:7-alpine
     container_name: redis
 
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
 
     networks:
-      - backend
+      - browser-platform-net
 
   session-service:
     build:
@@ -15,18 +15,24 @@ services:
 
     container_name: session-service
 
+    restart: unless-stopped
+
     ports:
       - "3000:3000"
 
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
     depends_on:
       - redis
 
     networks:
-      - backend
+      - browser-platform-net
 
 networks:
-  backend:
-    driver: bridge
+  browser-platform-net:
+    external: true

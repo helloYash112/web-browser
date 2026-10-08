@@ -25,13 +25,13 @@ router.post("/session", async (req, res) => {
 });
 
 router.get("/sessions", (req, res) => {
+  const sessions = sessionService.getAllSessions();
 
-  res.json(
-    getAllSessions()
-  );
-
+  res.json({
+    count: sessions.length,
+    sessions
+  });
 });
-
 router.get("/session/:id", (req, res) => {
 
   const session =

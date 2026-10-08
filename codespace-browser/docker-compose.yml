@@ -1,7 +1,10 @@
 services:
+
   firefox:
     image: kasmweb/firefox:1.17.0
+
     container_name: workspace_firefox
+
     restart: unless-stopped
 
     ports:
@@ -12,9 +15,7 @@ services:
       DISABLE_AUTH: "true"
       VNC_PW: "SecurePassword123!"
       VNC_RESOLUTION: "1920x1080"
-
       MAX_FRAME_RATE: "60"
-
       START_PULSEAUDIO: "1"
       KASM_SVC_AUDIO: "1"
 
@@ -23,13 +24,16 @@ services:
     security_opt:
       - seccomp:unconfined
 
-    network_mode: bridge
+    networks:
+      - browser-platform-net
+
 
   audio-bridge:
     build:
       context: ./audio-bridge
 
     container_name: firefox_audio_bridge
+
     restart: unless-stopped
 
     ports:
@@ -37,12 +41,17 @@ services:
 
     environment:
       PORT: "7000"
-      KASM_HOST: "host.docker.internal"
+
+      KASM_HOST: workspace_firefox
       KASM_AUDIO_PORT: "4901"
-      KASM_USER: "kasm_user"
+
+      KASM_USER: kasm_user
       KASM_PASSWORD: "SecurePassword123!"
 
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    networks:
+      - browser-platform-net
 
-    network_mode: bridge
+
+networks:
+  browser-platform-net:
+    external: true
