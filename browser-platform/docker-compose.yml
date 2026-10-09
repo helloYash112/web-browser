@@ -1,5 +1,4 @@
 services:
-
   redis:
     image: redis:7-alpine
     container_name: redis
@@ -26,6 +25,10 @@ services:
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
+
+      SESSION_TTL_MS: "1800000"
+      CLEANUP_INTERVAL_MS: "30000"
+      
 
     depends_on:
       - redis

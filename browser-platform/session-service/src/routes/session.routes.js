@@ -1,3 +1,4 @@
+
 const express = require("express");
 
 const router = express.Router();
@@ -6,58 +7,114 @@ const {
   createSession,
   getSession,
   getAllSessions,
-  deleteSession
+  deleteSession,
+  syncSessionStatus
 } = require("../services/session.service");
 
+const {
+  auditReconciliation,
+} = require("../services/reconciliation.service");
+
 router.get("/health", (req, res) => {
-  res.json({
-    status: "ok"
+  res.status(200).json({
+    status: "ok",
+    service: "session-service",
   });
 });
 
-router.post("/session", async (req, res) => {
+// Create a browser session
+router.post("/session", async (req, res, next) => {
+  try {
+    const session = await createSession();
 
-  const session =
-    await createSession();
-
-  res.json(session);
-
+    res.status(201).json(session);
+  } catch (error) {
+    next(error);
+  }
 });
 
-router.get("/sessions", (req, res) => {
-  const sessions = sessionService.getAllSessions();
+// List all browser sessions
+router.get("/sessions", async (req, res, next) => {
+  try {
+    const sessions = await getAllSessions();
 
-  res.json({
-    count: sessions.length,
-    sessions
-  });
+    res.status(200).json({
+      count: sessions.length,
+      sessions,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
-router.get("/session/:id", (req, res) => {
 
-  const session =
-    getSession(req.params.id);
+// Get one browser session
 
-  if (!session) {
-    return res.status(404).send();
+router.get("/session/:id", async (req, res, next) => {
+  try {
+    const session = await getSession(req.params.id);
+
+    if (!session) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
+    }
+
+  
+    const updated = await syncSessionStatus(session);
+
+    if (!updated) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
+    }
+
+    res.status(200).json(updated);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Delete a browser session
+router.delete("/session/:id", async (req, res, next) => {
+  try {
+    const deleted = await deleteSession(req.params.id);
+
+    if (!deleted) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
+    }
+
+    res.status(200).json({
+      sessionId: req.params.id,
+      deleted: true,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Read-only Docker and Redis reconciliation audit
+router.get("/reconciliation/audit", async (req, res, next) => {
+  try {
+    const report = await auditReconciliation();
+    res.status(200).json(report);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Centralized error handling
+router.use((error, req, res, next) => {
+  console.error("Session API error:", error);
+
+  if (res.headersSent) {
+    return next(error);
   }
 
-  res.json(session);
-
-});
-
-router.delete("/session/:id", async (req, res) => {
-
-  const deleted =
-    await deleteSession(req.params.id);
-
-  if (!deleted) {
-    return res.status(404).send();
-  }
-
-  res.json({
-    deleted: true
+  res.status(500).json({
+    error: "Internal session service error",
   });
-
 });
 
 module.exports = router;
