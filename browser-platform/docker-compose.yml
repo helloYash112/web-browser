@@ -28,6 +28,8 @@ services:
 
       SESSION_TTL_MS: "1800000"
       CLEANUP_INTERVAL_MS: "30000"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in the project .env file}
+      JWT_EXPIRES_IN: "15m"
       
 
     depends_on:
@@ -35,6 +37,43 @@ services:
 
     networks:
       - browser-platform-net
+
+  browser-proxy:
+    build:
+      context: ./browser-proxy
+    container_name: browser-proxy
+    restart: unless-stopped
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      BROWSER_COOKIE_TTL_SECONDS: "1800"
+    depends_on:
+      - redis
+    networks:
+      - browser-platform-net
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: browser-frontend
+    restart: unless-stopped
+    networks:
+      - browser-platform-net
+  
+  gateway:
+    build:
+      context: ./gateway
+    container_name: browser-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - session-service
+      - browser-proxy
+      - frontend
+    networks:
+      - browser-platform-net
+
 
 networks:
   browser-platform-net:

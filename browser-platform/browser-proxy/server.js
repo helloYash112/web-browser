@@ -1,0 +1,397 @@
+const http = require("http");
+const crypto = require("crypto");
+const https = require("https");
+
+const httpProxy = require("http-proxy");
+const { createClient } = require("redis");
+
+
+
+
+
+const PORT = Number(process.env.PORT || 3001);
+const COOKIE_TTL = Number(
+  process.env.BROWSER_COOKIE_TTL_SECONDS || 86400
+);
+const KASM_USERNAME = process.env.KASM_USERNAME || "kasm_user";
+const KASM_PASSWORD = process.env.KASM_PASSWORD || "vncpassword";
+
+const UPSTREAM_AUTH =
+  "Basic " +
+  Buffer.from(`${KASM_USERNAME}:${KASM_PASSWORD}`).toString("base64");
+
+const redis = createClient({
+  url: `redis://${process.env.REDIS_HOST || "redis"}:${process.env.REDIS_PORT || 6379}`,
+});
+
+redis.on("error", (error) => {
+  console.error("Browser proxy Redis error:", error.message);
+});
+
+const proxy = httpProxy.createProxyServer({
+  changeOrigin: true,
+  secure: false,
+  agent: new https.Agent({
+    rejectUnauthorized: false,
+    keepAlive: true,
+  }),
+});
+
+
+// Forward Kasm's upstream Basic Authentication for HTTP requests.
+
+
+/* Add Kasm Basic Auth to ordinary HTTP requests. */
+proxy.on("proxyReq", (proxyReq, req) => {
+  proxyReq.setHeader("Authorization", UPSTREAM_AUTH);
+
+  console.log("[HTTP] Forwarding to Firefox:", {
+    method: req.method,
+    path: new URL(req.url, "http://localhost").pathname,
+    upstreamHost: proxyReq.getHeader("host"),
+    authorizationPresent: Boolean(proxyReq.getHeader("authorization")),
+  });
+});
+
+/* Add Kasm Basic Auth to WebSocket handshakes. */
+proxy.on("proxyReqWs", (proxyReq, req) => {
+ proxyReq.setHeader("Authorization", UPSTREAM_AUTH);
+proxyReq.setHeader("Connection", "Upgrade");
+proxyReq.setHeader("Upgrade", "websocket");
+
+if (req.kasmUpstreamHost) {
+  proxyReq.setHeader("Host", req.kasmUpstreamHost);
+}
+
+  proxyReq.setHeader(
+    "Sec-WebSocket-Origin",
+    req.headers.origin || `http://${req.headers.host}`
+  );
+
+  
+  console.log("[WS] Upstream handshake headers:", {
+    connection: proxyReq.getHeader("connection"),
+    upgrade: proxyReq.getHeader("upgrade"),
+    websocketKeyPresent: Boolean(
+      proxyReq.getHeader("sec-websocket-key")
+    ),
+    websocketVersion: proxyReq.getHeader(
+      "sec-websocket-version"
+    ),
+    websocketOrigin: proxyReq.getHeader(
+      "sec-websocket-origin"
+    ),
+    authorizationPresent: Boolean(
+      proxyReq.getHeader("authorization")
+    ),
+  });
+
+
+  console.log("[WS] Forwarding to Firefox:", {
+    path: req.url.split("?")[0],
+    upstreamHost: proxyReq.getHeader("host"),
+    authorizationPresent: Boolean(proxyReq.getHeader("authorization")),
+  });
+});
+
+
+proxy.on("error", (error, req, res) => {
+  console.error("Browser proxy error:", error.message);
+
+  if (res && typeof res.writeHead === "function" && !res.headersSent) {
+    res.writeHead(502, { "Content-Type": "text/plain" });
+    res.end("Browser session is temporarily unavailable");
+  } else if (res && typeof res.destroy === "function") {
+    res.destroy();
+  }
+});
+
+proxy.on("open", (proxySocket) => {
+  console.log("[WS] Upstream socket opened");
+});
+
+proxy.on("close", (res, socket, head) => {
+  console.log("[PROXY] Upstream connection closed");
+});
+
+function getSessionIdFromHost(hostHeader = "") {
+  const host = hostHeader.split(":")[0].toLowerCase();
+
+  // Browser sessions use: <session-uuid>.localhost
+  const match = host.match(
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.localhost$/
+  );
+
+  return match ? match[1] : null;
+}
+
+function getCookie(req) {
+  const cookies = req.headers.cookie || "";
+  const match = cookies.match(/(?:^|;\s*)browser_session=([^;]+)/);
+
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+const SESSION_TTL_MS = Number(
+  process.env.SESSION_TTL_MS || 30 * 60 * 1000
+);
+
+const ACTIVITY_REFRESH_INTERVAL_MS = 15000;
+const lastActivityWrite = new Map();
+
+async function touchSessionActivity(sessionId) {
+  const now = Date.now();
+  const previous = lastActivityWrite.get(sessionId) || 0;
+
+  if (now - previous < ACTIVITY_REFRESH_INTERVAL_MS) {
+    return;
+  }
+
+  // Throttle Redis writes while allowing continuous browser traffic
+  // to keep the inactivity timestamp fresh.
+  lastActivityWrite.set(sessionId, now);
+
+  try {
+    await redis.set(
+      `session-activity:${sessionId}`,
+      String(now),
+      { EX: Math.ceil((SESSION_TTL_MS * 2) / 1000) }
+    );
+  } catch (error) {
+    lastActivityWrite.delete(sessionId);
+    console.error(
+      `Failed to refresh activity for ${sessionId}:`,
+      error.message
+    );
+  }
+}
+
+async function getAuthorizedSession(sessionId, cookieValue) {
+  if (!sessionId || !cookieValue) {
+    return null;
+  }
+
+  const cookieKey =
+    `browser-cookie:${crypto.createHash("sha256").update(cookieValue).digest("hex")}`;
+
+  const cookieData = await redis.get(cookieKey);
+
+  if (!cookieData) {
+    return null;
+  }
+
+  const browserAuth = JSON.parse(cookieData);
+
+  // A browser cookie cannot be used to access a different session.
+  if (browserAuth.sessionId !== sessionId) {
+    return null;
+  }
+
+  const sessionData = await redis.get(`session:${sessionId}`);
+
+  if (!sessionData) {
+    await redis.del(cookieKey);
+    return null;
+  }
+
+  const session = JSON.parse(sessionData);
+
+  if (
+    session.ownerId !== browserAuth.ownerId ||
+    session.sessionId !== sessionId ||
+    session.containerName !== `firefox-${sessionId}`
+  ) {
+    return null;
+  }
+
+   await touchSessionActivity(sessionId);
+
+  return session;
+}
+
+async function handleRequest(req, res) {
+  console.log("[HTTP] Incoming request:", {
+  method: req.method,
+  host: req.headers.host,
+  path: new URL(req.url, "http://localhost").pathname,
+  hasCookie: Boolean(req.headers.cookie),
+});
+  const sessionId = getSessionIdFromHost(req.headers.host);
+
+  // The regular localhost address remains useful for gateway checks.
+  if (!sessionId) {
+    if (req.url === "/" || req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("Browser proxy running");
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Unknown browser session host");
+    return;
+  }
+
+  const requestUrl = new URL(req.url, "http://localhost");
+  const ticket = requestUrl.searchParams.get("ticket");
+
+  // A one-time ticket can only be used for the initial page request.
+  if (ticket) {
+    if (req.method !== "GET" || requestUrl.pathname !== "/") {
+      res.writeHead(400, { "Content-Type": "text/plain" });
+      res.end("Invalid browser launch request");
+      return;
+    }
+
+    const ticketData = await redis.getDel(`browser-ticket:${ticket}`);
+
+    if (!ticketData) {
+      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.end("Browser launch ticket is invalid or expired");
+      return;
+    }
+
+    const launch = JSON.parse(ticketData);
+
+    if (launch.sessionId !== sessionId) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Browser session mismatch");
+      return;
+    }
+
+    const sessionData = await redis.get(`session:${sessionId}`);
+
+    if (!sessionData) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Browser session not found");
+      return;
+    }
+
+    const session = JSON.parse(sessionData);
+
+    if (
+      session.ownerId !== launch.ownerId ||
+      session.containerName !== `firefox-${sessionId}`
+    ) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Browser session access denied");
+      return;
+    }
+
+    const cookieValue = crypto.randomBytes(32).toString("base64url");
+    const cookieKey =
+      `browser-cookie:${crypto.createHash("sha256").update(cookieValue).digest("hex")}`;
+
+    await redis.set(
+      cookieKey,
+      JSON.stringify({
+        sessionId,
+        ownerId: launch.ownerId,
+      }),
+      { EX: COOKIE_TTL }
+    );
+
+    res.writeHead(302, {
+      "Set-Cookie":
+        `browser_session=${encodeURIComponent(cookieValue)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_TTL}`,
+      Location: "/",
+      "Cache-Control": "no-store",
+    });
+
+    res.end();
+    return;
+  }
+
+  const cookieValue = getCookie(req);
+  const session = await getAuthorizedSession(sessionId, cookieValue);
+
+  if (!session) {
+    res.writeHead(401, { "Content-Type": "text/plain" });
+    res.end("Browser authentication required. Launch the session again.");
+    return;
+  }
+
+  const target = `https://${session.containerName}:6901`;
+
+  proxy.web(req, res, {
+    target,
+    secure: false,
+    changeOrigin: true,
+  });
+}
+
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((error) => {
+    console.error("Browser proxy request failed:", error.message);
+
+    if (!res.headersSent) {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("Browser proxy internal error");
+    } else {
+      res.end();
+    }
+  });
+});
+
+// Kasm browser traffic also uses WebSockets.
+
+server.on("upgrade", async (req, socket, head) => {
+  try {
+    const sessionId = getSessionIdFromHost(req.headers.host);
+    const cookieValue = getCookie(req);
+    const session = await getAuthorizedSession(sessionId, cookieValue);
+
+    if (!session) {
+      socket.write(
+        "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"
+      );
+      socket.destroy();
+      return;
+    }
+
+    const upstreamHost = `${session.containerName}:6901`;
+
+    // Make the intended upstream Host available to proxyReqWs.
+    req.kasmUpstreamHost = upstreamHost;
+
+    console.log("[WS] Incoming upgrade:", {
+      url: req.url,
+      host: req.headers.host,
+      upgrade: req.headers.upgrade,
+      connection: req.headers.connection,
+      protocol: req.headers["sec-websocket-protocol"],
+      sessionId,
+    });
+
+    proxy.ws(req, socket, head, {
+      target: `https://${upstreamHost}`,
+      secure: false,
+      changeOrigin: true,
+      headers: {
+        Host: upstreamHost,
+        Authorization: UPSTREAM_AUTH,
+        "Sec-WebSocket-Origin":
+          req.headers.origin || `http://${req.headers.host}`,
+      },
+    });
+  } catch (error) {
+    console.error("[WS] Upgrade failed:", error.message);
+
+    if (!socket.destroyed) {
+      socket.destroy();
+    }
+  }
+});
+
+
+async function start() {
+  await redis.connect();
+
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Browser proxy listening on port ${PORT}`);
+  });
+}
+
+start().catch((error) => {
+  console.error("Browser proxy failed to start:", error);
+  process.exit(1);
+});

@@ -4,6 +4,7 @@ const {
   deleteSession,
   syncAllSessionStatuses,
 } = require("./session.service");
+const { redis } = require("../config/redis");
 
 const SESSION_TTL_MS = Number(
   process.env.SESSION_TTL_MS || 30 * 60 * 1000
@@ -22,32 +23,41 @@ async function cleanupExpiredSessions() {
   cleanupRunning = true;
 
   try {
-    // Synchronize saved statuses with actual Docker state.
     await syncAllSessionStatuses();
 
-    // Then expire sessions based on creation time.
     const sessions = await getAllSessions();
     const now = Date.now();
 
     for (const session of sessions) {
-      const createdAt = Date.parse(session.createdAt);
+      const activityKey = `session-activity:${session.sessionId}`;
+      const activityValue = await redis.get(activityKey);
 
-      if (!Number.isFinite(createdAt)) {
+      const fallbackTime = Date.parse(
+        session.lastActivityAt || session.createdAt
+      );
+
+      const lastActivity = activityValue
+        ? Number(activityValue)
+        : fallbackTime;
+
+      if (!Number.isFinite(lastActivity)) {
         console.warn(
-          `Invalid creation time: ${session.sessionId}`
+          `Invalid activity time: ${session.sessionId}`
         );
         continue;
       }
 
-      if (now - createdAt >= SESSION_TTL_MS) {
+      if (now - lastActivity >= SESSION_TTL_MS) {
         console.log(
-          `Cleaning up expired session: ${session.sessionId}`
+          `Cleaning up inactive session: ${session.sessionId}`
         );
 
         try {
           await deleteSession(session.sessionId);
+          await redis.del(activityKey);
+
           console.log(
-            `Removed expired session: ${session.sessionId}`
+            `Removed inactive session: ${session.sessionId}`
           );
         } catch (error) {
           console.error(
@@ -71,10 +81,9 @@ function startCleanupJob() {
   if (cleanupTimer) return;
 
   console.log(
-    `Background monitor started. TTL: ${SESSION_TTL_MS}ms; interval: ${CLEANUP_INTERVAL_MS}ms`
+    `Background monitor started. Inactivity TTL: ${SESSION_TTL_MS}ms; interval: ${CLEANUP_INTERVAL_MS}ms`
   );
 
-  // Run once immediately, then repeat on the configured interval.
   void cleanupExpiredSessions();
 
   cleanupTimer = setInterval(() => {

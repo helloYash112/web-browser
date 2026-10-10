@@ -3,7 +3,11 @@ const docker = require("./docker.service");
 const { redis } = require("../config/redis");
 const https = require("https");
 
-async function createSession() {
+async function createSession(ownerId) {
+  if (!ownerId) {
+    throw new Error("Session owner is required");
+  }
+
   const sessionId = crypto.randomUUID();
   const containerName = `firefox-${sessionId}`;
 
@@ -16,10 +20,10 @@ async function createSession() {
       name: containerName,
 
       Env: [
-        "DISABLE_AUTH=true",
         "VNC_RESOLUTION=1280x720",
         "MAX_FRAME_RATE=30",
         "VNC_PW=vncpassword",
+        "VNCOPTIONS=-PreferBandwidth -DynamicQualityMin=4 -DynamicQualityMax=7 -DLP_ClipDelay=0 -disableBasicAuth",
       ],
 
       ExposedPorts: {
@@ -29,11 +33,6 @@ async function createSession() {
       HostConfig: {
         NetworkMode: "browser-platform-net",
         ShmSize: 2147483648,
-
-        PortBindings: {
-          "6901/tcp": [{ HostPort: "" }],
-        },
-
         RestartPolicy: {
           Name: "unless-stopped",
         },
@@ -44,21 +43,20 @@ async function createSession() {
     await container.start();
 
     // 3. Confirm Docker assigned a host port.
+    // 3. Confirm the Firefox container is running.
     const inspect = await container.inspect();
-    const portBindings = inspect.NetworkSettings.Ports["6901/tcp"];
-    const hostPort = portBindings?.[0]?.HostPort;
 
-    if (!hostPort) {
-      throw new Error("Docker did not assign a browser port");
+    if (!inspect.State.Running) {
+      throw new Error("Firefox container is not running");
     }
 
     // 4. Build the session record.
     const session = {
       sessionId,
+      ownerId,
       containerId: container.id,
       containerName,
-      hostPort,
-      browserUrl: `http://localhost:${hostPort}`,
+      browserHost: `${sessionId}.localhost:8080`,
       status: "running",
       createdAt: new Date().toISOString(),
     };
@@ -90,27 +88,42 @@ async function createSession() {
   }
 }
 
-async function getAllSessions() {
+async function getAllSessions(ownerId) {
   const keys = await redis.keys("session:*");
   const sessions = [];
 
   for (const key of keys) {
     const data = await redis.get(key);
 
-    if (data) {
-      sessions.push(JSON.parse(data));
+    if (!data) continue;
+
+    const session = JSON.parse(data);
+
+    // When called for a user, never return another user's sessions.
+    if (ownerId !== undefined && session.ownerId !== ownerId) {
+      continue;
     }
+
+    sessions.push(session);
   }
 
   return sessions;
 }
 
-async function getSession(id) {
+async function getSession(id, ownerId) {
   const data = await redis.get(`session:${id}`);
-  return data ? JSON.parse(data) : null;
-}
 
-async function deleteSession(id) {
+  if (!data) return null;
+
+  const session = JSON.parse(data);
+
+  if (ownerId !== undefined && session.ownerId !== ownerId) {
+    return null;
+  }
+
+  return session;
+}
+async function deleteSession(id, ownerId) {
   const data = await redis.get(`session:${id}`);
 
   if (!data) {
@@ -118,6 +131,10 @@ async function deleteSession(id) {
   }
 
   const session = JSON.parse(data);
+
+  if (ownerId !== undefined && session.ownerId !== ownerId) {
+    return null;
+  }
   const container = docker.getContainer(session.containerId);
 
   try {
