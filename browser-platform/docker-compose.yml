@@ -16,9 +16,6 @@ services:
 
     restart: unless-stopped
 
-    ports:
-      - "3000:3000"
-
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -30,11 +27,23 @@ services:
       CLEANUP_INTERVAL_MS: "30000"
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in the project .env file}
       JWT_EXPIRES_IN: "15m"
-      
 
     depends_on:
       - redis
 
+    networks:
+      - browser-platform-net
+
+  audio-bridge:
+    build:
+      context: ./audio-bridge
+    container_name: audio-bridge
+    restart: unless-stopped
+    environment:
+      PORT: "7000"
+      KASM_USERNAME: kasm_user
+      KASM_PASSWORD: vncpassword
+      AUDIO_BRIDGE_SECRET: ${AUDIO_BRIDGE_SECRET:?AUDIO_BRIDGE_SECRET must be set in .env}
     networks:
       - browser-platform-net
 
@@ -47,8 +56,10 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       BROWSER_COOKIE_TTL_SECONDS: "1800"
+      AUDIO_BRIDGE_SECRET: ${AUDIO_BRIDGE_SECRET:?AUDIO_BRIDGE_SECRET must be set in .env}
     depends_on:
       - redis
+      - audio-bridge
     networks:
       - browser-platform-net
 
@@ -59,7 +70,7 @@ services:
     restart: unless-stopped
     networks:
       - browser-platform-net
-  
+
   gateway:
     build:
       context: ./gateway
@@ -73,7 +84,6 @@ services:
       - frontend
     networks:
       - browser-platform-net
-
 
 networks:
   browser-platform-net:

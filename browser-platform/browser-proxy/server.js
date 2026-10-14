@@ -5,14 +5,8 @@ const https = require("https");
 const httpProxy = require("http-proxy");
 const { createClient } = require("redis");
 
-
-
-
-
 const PORT = Number(process.env.PORT || 3001);
-const COOKIE_TTL = Number(
-  process.env.BROWSER_COOKIE_TTL_SECONDS || 86400
-);
+const COOKIE_TTL = Number(process.env.BROWSER_COOKIE_TTL_SECONDS || 86400);
 const KASM_USERNAME = process.env.KASM_USERNAME || "kasm_user";
 const KASM_PASSWORD = process.env.KASM_PASSWORD || "vncpassword";
 
@@ -22,6 +16,27 @@ const UPSTREAM_AUTH =
 
 const redis = createClient({
   url: `redis://${process.env.REDIS_HOST || "redis"}:${process.env.REDIS_PORT || 6379}`,
+});
+
+const AUDIO_BRIDGE_SECRET = process.env.AUDIO_BRIDGE_SECRET || "";
+const audioProxy = httpProxy.createProxyServer({ changeOrigin: true });
+
+audioProxy.on("proxyReq", (proxyReq, req) => {
+  const session = req.audioSession;
+  if (!session) return;
+  proxyReq.setHeader("X-Audio-Bridge-Secret", AUDIO_BRIDGE_SECRET);
+  proxyReq.setHeader("X-Audio-Session-Id", session.sessionId);
+  proxyReq.setHeader("X-Audio-Container", session.containerName);
+});
+
+audioProxy.on("error", (error, req, res) => {
+  console.error("Audio proxy error:", error.message);
+  if (res && !res.headersSent) {
+    res.writeHead(502, { "Content-Type": "text/plain" });
+    res.end("Audio stream is temporarily unavailable");
+  } else if (res && !res.destroyed) {
+    res.end();
+  }
 });
 
 redis.on("error", (error) => {
@@ -37,9 +52,7 @@ const proxy = httpProxy.createProxyServer({
   }),
 });
 
-
 // Forward Kasm's upstream Basic Authentication for HTTP requests.
-
 
 /* Add Kasm Basic Auth to ordinary HTTP requests. */
 proxy.on("proxyReq", (proxyReq, req) => {
@@ -55,37 +68,27 @@ proxy.on("proxyReq", (proxyReq, req) => {
 
 /* Add Kasm Basic Auth to WebSocket handshakes. */
 proxy.on("proxyReqWs", (proxyReq, req) => {
- proxyReq.setHeader("Authorization", UPSTREAM_AUTH);
-proxyReq.setHeader("Connection", "Upgrade");
-proxyReq.setHeader("Upgrade", "websocket");
+  proxyReq.setHeader("Authorization", UPSTREAM_AUTH);
+  proxyReq.setHeader("Connection", "Upgrade");
+  proxyReq.setHeader("Upgrade", "websocket");
 
-if (req.kasmUpstreamHost) {
-  proxyReq.setHeader("Host", req.kasmUpstreamHost);
-}
+  if (req.kasmUpstreamHost) {
+    proxyReq.setHeader("Host", req.kasmUpstreamHost);
+  }
 
   proxyReq.setHeader(
     "Sec-WebSocket-Origin",
-    req.headers.origin || `http://${req.headers.host}`
+    req.headers.origin || `http://${req.headers.host}`,
   );
 
-  
   console.log("[WS] Upstream handshake headers:", {
     connection: proxyReq.getHeader("connection"),
     upgrade: proxyReq.getHeader("upgrade"),
-    websocketKeyPresent: Boolean(
-      proxyReq.getHeader("sec-websocket-key")
-    ),
-    websocketVersion: proxyReq.getHeader(
-      "sec-websocket-version"
-    ),
-    websocketOrigin: proxyReq.getHeader(
-      "sec-websocket-origin"
-    ),
-    authorizationPresent: Boolean(
-      proxyReq.getHeader("authorization")
-    ),
+    websocketKeyPresent: Boolean(proxyReq.getHeader("sec-websocket-key")),
+    websocketVersion: proxyReq.getHeader("sec-websocket-version"),
+    websocketOrigin: proxyReq.getHeader("sec-websocket-origin"),
+    authorizationPresent: Boolean(proxyReq.getHeader("authorization")),
   });
-
 
   console.log("[WS] Forwarding to Firefox:", {
     path: req.url.split("?")[0],
@@ -93,7 +96,6 @@ if (req.kasmUpstreamHost) {
     authorizationPresent: Boolean(proxyReq.getHeader("authorization")),
   });
 });
-
 
 proxy.on("error", (error, req, res) => {
   console.error("Browser proxy error:", error.message);
@@ -119,7 +121,7 @@ function getSessionIdFromHost(hostHeader = "") {
 
   // Browser sessions use: <session-uuid>.localhost
   const match = host.match(
-    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.localhost$/
+    /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.localhost$/,
   );
 
   return match ? match[1] : null;
@@ -132,9 +134,7 @@ function getCookie(req) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-const SESSION_TTL_MS = Number(
-  process.env.SESSION_TTL_MS || 30 * 60 * 1000
-);
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 30 * 60 * 1000);
 
 const ACTIVITY_REFRESH_INTERVAL_MS = 15000;
 const lastActivityWrite = new Map();
@@ -152,16 +152,14 @@ async function touchSessionActivity(sessionId) {
   lastActivityWrite.set(sessionId, now);
 
   try {
-    await redis.set(
-      `session-activity:${sessionId}`,
-      String(now),
-      { EX: Math.ceil((SESSION_TTL_MS * 2) / 1000) }
-    );
+    await redis.set(`session-activity:${sessionId}`, String(now), {
+      EX: Math.ceil((SESSION_TTL_MS * 2) / 1000),
+    });
   } catch (error) {
     lastActivityWrite.delete(sessionId);
     console.error(
       `Failed to refresh activity for ${sessionId}:`,
-      error.message
+      error.message,
     );
   }
 }
@@ -171,8 +169,7 @@ async function getAuthorizedSession(sessionId, cookieValue) {
     return null;
   }
 
-  const cookieKey =
-    `browser-cookie:${crypto.createHash("sha256").update(cookieValue).digest("hex")}`;
+  const cookieKey = `browser-cookie:${crypto.createHash("sha256").update(cookieValue).digest("hex")}`;
 
   const cookieData = await redis.get(cookieKey);
 
@@ -204,18 +201,18 @@ async function getAuthorizedSession(sessionId, cookieValue) {
     return null;
   }
 
-   await touchSessionActivity(sessionId);
+  await touchSessionActivity(sessionId);
 
   return session;
 }
 
 async function handleRequest(req, res) {
   console.log("[HTTP] Incoming request:", {
-  method: req.method,
-  host: req.headers.host,
-  path: new URL(req.url, "http://localhost").pathname,
-  hasCookie: Boolean(req.headers.cookie),
-});
+    method: req.method,
+    host: req.headers.host,
+    path: new URL(req.url, "http://localhost").pathname,
+    hasCookie: Boolean(req.headers.cookie),
+  });
   const sessionId = getSessionIdFromHost(req.headers.host);
 
   // The regular localhost address remains useful for gateway checks.
@@ -278,8 +275,7 @@ async function handleRequest(req, res) {
     }
 
     const cookieValue = crypto.randomBytes(32).toString("base64url");
-    const cookieKey =
-      `browser-cookie:${crypto.createHash("sha256").update(cookieValue).digest("hex")}`;
+    const cookieKey = `browser-cookie:${crypto.createHash("sha256").update(cookieValue).digest("hex")}`;
 
     await redis.set(
       cookieKey,
@@ -287,12 +283,11 @@ async function handleRequest(req, res) {
         sessionId,
         ownerId: launch.ownerId,
       }),
-      { EX: COOKIE_TTL }
+      { EX: COOKIE_TTL },
     );
 
     res.writeHead(302, {
-      "Set-Cookie":
-        `browser_session=${encodeURIComponent(cookieValue)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_TTL}`,
+      "Set-Cookie": `browser_session=${encodeURIComponent(cookieValue)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_TTL}`,
       Location: "/",
       "Cache-Control": "no-store",
     });
@@ -307,6 +302,49 @@ async function handleRequest(req, res) {
   if (!session) {
     res.writeHead(401, { "Content-Type": "text/plain" });
     res.end("Browser authentication required. Launch the session again.");
+    return;
+  }
+
+  if (requestUrl.pathname === "/_audio/player") {
+    res.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
+
+    res.end(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Audio</title>
+</head>
+<body style="font-family:system-ui;margin:32px">
+  <h2>Browser Session Audio</h2>
+  <p>Press Play if audio does not start automatically.</p>
+  <audio controls autoplay src="/_audio/stream" style="width:100%"></audio>
+</body>
+</html>`);
+
+    return;
+  }
+
+  if (requestUrl.pathname === "/_audio/stream") {
+    if (req.method !== "GET") {
+      res.writeHead(405, { Allow: "GET", "Content-Type": "text/plain" });
+      res.end("Method not allowed");
+      return;
+    }
+    if (!AUDIO_BRIDGE_SECRET) {
+      res.writeHead(503, { "Content-Type": "text/plain" });
+      res.end("Audio bridge is not configured");
+      return;
+    }
+    req.audioSession = session;
+    req.url = "/stream";
+    audioProxy.web(req, res, {
+      target: "http://audio-bridge:7000",
+      changeOrigin: true,
+    });
     return;
   }
 
@@ -341,9 +379,7 @@ server.on("upgrade", async (req, socket, head) => {
     const session = await getAuthorizedSession(sessionId, cookieValue);
 
     if (!session) {
-      socket.write(
-        "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"
-      );
+      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;
     }
@@ -381,7 +417,6 @@ server.on("upgrade", async (req, socket, head) => {
     }
   }
 });
-
 
 async function start() {
   await redis.connect();
