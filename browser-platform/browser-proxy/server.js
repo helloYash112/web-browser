@@ -300,6 +300,40 @@ async function handleRequest(req, res) {
   const session = await getAuthorizedSession(sessionId, cookieValue);
 
   if (!session) {
+    if (requestUrl.pathname === "/_audio/player" && req.method === "GET") {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+
+      res.end(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connecting browser audio</title>
+</head>
+<body style="font-family:system-ui;margin:32px">
+  <h2>Connecting browser audio…</h2>
+  <p id="status">Waiting for your Firefox session to authenticate.</p>
+  <button id="retry" hidden onclick="sessionStorage.removeItem('audio-wait-count');location.reload()">Retry connection</button>
+  <script>
+    const count = Number(sessionStorage.getItem("audio-wait-count") || "0") + 1;
+    sessionStorage.setItem("audio-wait-count", String(count));
+
+    if (count <= 60) {
+      setTimeout(() => location.reload(), 1000);
+    } else {
+      document.getElementById("status").textContent =
+        "Authentication is taking too long. Open Firefox first, then retry.";
+      document.getElementById("retry").hidden = false;
+    }
+  </script>
+</body>
+</html>`);
+      return;
+    }
+
     res.writeHead(401, { "Content-Type": "text/plain" });
     res.end("Browser authentication required. Launch the session again.");
     return;
